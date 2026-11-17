@@ -69,30 +69,48 @@ def cmd_a(a):
     B.assign(sample=m["sample"], group=m["group"]).to_csv(a.out + "_1a_table.tsv", sep="\t", index=False)
 
 def cmd_b(a):
+    """Fig 1b multi-track example region. tracks TSV columns: label, path, color, [scale], [assay], [kind].
+    .bw/.bigwig -> signal track; .tsv (eig file: chrom,start,end,E1) -> compartment PC1 track (red/blue bars).
+    Tracks with the same 'assay' share one y-scale so samples are comparable."""
     import pyBigWig
-    T = pd.read_csv(a.tracks, sep="\t")             # label, path, color, [scale]
+    T = pd.read_csv(a.tracks, sep="\t")
     ch, rest = a.region.split(":"); s, e = [int(x.replace(",", "")) for x in rest.split("-")]
     n = len(T) + (1 if a.cool else 0)
-    fig, axs = plt.subplots(n, 1, figsize=(9, 0.9 * n + 1), sharex=True,
-                            gridspec_kw={"height_ratios": ([4] if a.cool else []) + [1] * len(T)})
+    fig, axs = plt.subplots(n, 1, figsize=(9, 0.55 * n + 1.2), sharex=True, gridspec_kw={"height_ratios": ([4] if a.cool else []) + [1] * len(T)})
     axs = np.atleast_1d(axs); k = 0
     if a.cool:
         import cooler
         c = cooler.Cooler(a.cool); mat = c.matrix(balance=True).fetch(f"{ch}:{s}-{e}")
         mat = np.nan_to_num(mat); r = c.binsize
-        axs[0].imshow(np.log1p(mat * 1e3), cmap="Reds", extent=[s, e, e, s], aspect="auto")
-        axs[0].set_ylabel("Hi-C", fontsize=7); k = 1
-    bins = a.bins
+        axs[0].imshow(np.log1p(mat * 1e3), cmap="Reds", extent=[s, e, e, s], aspect="auto"); axs[0].set_ylabel("Hi-C", fontsize=7); k = 1
+    bins = a.bins; x = np.linspace(s, e, bins); vals = []
     for i, r_ in T.iterrows():
-        bw = pyBigWig.open(r_["path"]); v = np.nan_to_num(np.array(bw.stats(ch, s, e, nBins=bins, exact=False), dtype=float))
+        pth = str(r_["path"])
+        if pth.endswith(".tsv"):
+            d = pd.read_csv(pth, sep="\t"); d = d[(d.chrom == ch) & (d.end > s) & (d.start < e)]
+            v = np.interp(x, (d.start.values + d.end.values) / 2, d.E1.values) if len(d) else np.zeros(bins)
+        else:
+            bw = pyBigWig.open(pth); cc = ch if ch in bw.chroms() else (ch[3:] if ch.startswith("chr") else "chr" + ch)
+            v = np.nan_to_num(np.array(bw.stats(cc, s, e, nBins=bins, exact=False), dtype=float))
         sc = float(r_["scale"]) if "scale" in T.columns and pd.notna(r_.get("scale")) else 1.0
-        v = v * sc                                   # depth normalisation factor from table
-        x = np.linspace(s, e, bins); ax = axs[k + i]
-        ax.fill_between(x, v, color=r_.get("color", "#333") if pd.notna(r_.get("color", np.nan)) else "#333", lw=0)
-        ax.set_ylabel(r_["label"], rotation=0, ha="right", va="center", fontsize=7); ax.set_yticks([])
-        ax.set_ylim(0, np.percentile(v, 99.5) * 1.1 + 1e-9)
-    axs[-1].set_xlim(s, e); axs[-1].ticklabel_format(useOffset=False, style="plain"); axs[-1].set_xlabel(a.region)
-    fig.suptitle("Fig 1b  example region", fontsize=9); fig.tight_layout(); fig.savefig(a.out + "_1b.png", dpi=200)
+        vals.append(v * sc)
+    asy = T["assay"].fillna("").astype(str).values if "assay" in T.columns else np.array([""] * len(T))
+    for i, r_ in T.iterrows():
+        ax = axs[k + i]; v = vals[i]; col = r_.get("color", "#333") if pd.notna(r_.get("color", np.nan)) else "#333"; eigt = str(r_["path"]).endswith(".tsv")
+        same = [j for j in range(len(T)) if asy[j] == asy[i] and asy[i] != ""] or [i]
+        if eigt:
+            m = max(np.abs(vals[j]).max() for j in same) * 1.1 + 1e-9
+            ax.fill_between(x, 0, v, where=v >= 0, color="#c0392b", lw=0); ax.fill_between(x, 0, v, where=v < 0, color="#2c3e9e", lw=0); ax.set_ylim(-m, m); ax.axhline(0, color="k", lw=.3)
+        else:
+            ax.fill_between(x, v, color=col, lw=0); ax.set_ylim(0, max(np.percentile(vals[j], 99.5) for j in same) * 1.1 + 1e-9)
+        ax.set_ylabel(r_["label"], rotation=0, ha="right", va="center", fontsize=6); ax.set_yticks([])
+        for sp_ in ("top", "right"): ax.spines[sp_].set_visible(False)
+        if i == 0 or asy[i] != asy[i - 1]: ax.set_title(asy[i], fontsize=7, loc="left", pad=2) if asy[i] else None
+    axs[-1].set_xlim(s, e); axs[-1].ticklabel_format(useOffset=False, style="plain"); axs[-1].set_xlabel(a.region, fontsize=7)
+    if getattr(a, "gtf", None) and getattr(a, "gene", None):
+        gp = genes_from_gtf(a.gtf, [a.gene])
+        if a.gene in gp: axs[0].axvspan(gp[a.gene][1], gp[a.gene][2], color="#999", alpha=.25, lw=0); axs[0].text((gp[a.gene][1] + gp[a.gene][2]) / 2, axs[0].get_ylim()[1], a.gene, ha="center", va="bottom", fontsize=7, style="italic")
+    fig.tight_layout(rect=[0, 0, 1, 0.98]); fig.suptitle("Fig 1b  example region", fontsize=9, y=0.995); fig.savefig(a.out + "_1b.png", dpi=200); fig.savefig(a.out + "_1b.pdf")
 
 def add_controls(a, groups):
     """extra control samples: --controls file (one sample name per line, or sample<TAB>label); label defaults to 'control'"""
@@ -578,7 +596,7 @@ if __name__ == "__main__":
     for n in "abcfgh":
         s = sp.add_parser(n); s.add_argument("--out", required=True)
     s = sp.choices["a"]; s.add_argument("--manifest", required=True)
-    s = sp.choices["b"]; s.add_argument("--tracks", required=True); s.add_argument("--region", required=True); s.add_argument("--cool"); s.add_argument("--bins", type=int, default=600)
+    s = sp.choices["b"]; s.add_argument("--tracks", required=True); s.add_argument("--region", required=True); s.add_argument("--cool"); s.add_argument("--bins", type=int, default=600); s.add_argument("--gene"); s.add_argument("--gtf")
     for n in "cfg":
         s = sp.choices[n]; s.add_argument("--eig_dir", required=True); s.add_argument("--groups", required=True); s.add_argument("--zscore", action="store_true", help="per-sample per-chromosome z-score of E1 (comparable effect sizes)")
     s = sp.choices["c"]; s.add_argument("--prune", type=int, default=0, help="greedily drop N patient samples that least agree with their genotype group (reports shuffled-label null)"); s.add_argument("--top", type=float, default=0.10); s.add_argument("--controls", help="file listing control sample names (must have eig files)"); s.add_argument("--mad_k", type=float, default=2.0); s.add_argument("--min_in_r", type=float, default=0.0)
