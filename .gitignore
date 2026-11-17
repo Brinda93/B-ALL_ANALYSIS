@@ -1,0 +1,10 @@
+out/
+logs/
+*.png
+*.pdf
+*.pptx
+*.tsv
+*.tsv.gz
+*.mcool
+*.bw
+__pycache__/
